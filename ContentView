@@ -1,0 +1,360 @@
+import SwiftUI
+
+extension String {
+    func htmlDecoded() -> String {
+        guard let data = self.data(using: .utf8) else { return self }
+        do {
+            let attributedString = try NSAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.html], documentAttributes: nil)
+            return attributedString.string
+        } catch {
+            return self // Fallback if decoding fails
+        }
+    }
+}
+
+struct TriviaQuestion: Codable, Identifiable {
+    var id: String { question } // Use question text as an identifier
+    let question: String
+    let correct_answer: String
+    let incorrect_answers: [String]
+    
+    var allAnswers: [String] // Store shuffled answers here
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        question = try container.decode(String.self, forKey: .question)
+        correct_answer = try container.decode(String.self, forKey: .correct_answer)
+        incorrect_answers = try container.decode([String].self, forKey: .incorrect_answers)
+        
+        // Correct handling for boolean questions
+        if incorrect_answers.count == 1 && (correct_answer == "True" || correct_answer == "False") {
+            allAnswers = ["True", "False"]
+        } else {
+            allAnswers = (incorrect_answers + [correct_answer]).shuffled()
+        }
+    }
+}
+
+
+struct TriviaResponse: Codable {
+    let results: [TriviaQuestion]
+}
+class TriviaViewModel: ObservableObject {
+    @Published var questions: [TriviaQuestion] = []
+    @Published var selectedAnswers: [String: String] = [:]
+    @Published var score: Int? = nil
+    @Published var submitted = false // Tracks whether the answers have been submitted
+    @Published var timeRemaining: Int = 60 // Default time limit
+    @Published var timerRunning = false
+    
+    var timer: Timer?
+    
+    func fetchTrivia(categoryID: Int, difficulty: String, type: String, amount: Int, timeLimit: Int) {
+        let urlString = "https://opentdb.com/api.php?amount=\(amount)&category=\(categoryID)&difficulty=\(difficulty.lowercased())&type=\(type.lowercased())"
+        
+        guard let url = URL(string: urlString) else {
+            print("Invalid URL")
+            return
+        }
+        
+        URLSession.shared.dataTask(with: url) { data, response, error in
+            if let data = data {
+                do {
+                    let decodedResponse = try JSONDecoder().decode(TriviaResponse.self, from: data)
+                    DispatchQueue.main.async {
+                        self.questions = decodedResponse.results
+                        self.selectedAnswers = [:]
+                        self.score = nil
+                        self.submitted = false
+                        self.timeRemaining = timeLimit
+                        self.startTimer()
+                    }
+                } catch {
+                    print("Error decoding JSON: \(error)")
+                }
+            }
+        }.resume()
+    }
+    
+    func startTimer() {
+        timer?.invalidate()
+        timerRunning = true
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            if self.timeRemaining > 0 {
+                self.timeRemaining -= 1
+            } else {
+                self.submitAnswers()
+            }
+        }
+    }
+    
+    func submitAnswers() {
+        timer?.invalidate()
+        timerRunning = false
+        let correctCount = questions.filter { selectedAnswers[$0.id] == $0.correct_answer }.count
+        score = correctCount
+        submitted = true
+    }
+}
+struct TriviaGameView: View {
+    @StateObject var viewModel = TriviaViewModel()
+    var categoryID: Int
+    var difficulty: String
+    var type: String
+    var amount: Int
+    var timeLimit: Int
+    
+    var body: some View {
+        ZStack(alignment: .top) {
+            // Background Gradient only in the top part of the screen
+            LinearGradient(gradient: Gradient(colors: [Color.blue, Color.purple]), startPoint: .top, endPoint: .bottom)
+                .frame(height: 150) // Restrict gradient to top 150 points
+                .edgesIgnoringSafeArea([.top])
+            
+            VStack {
+                // Timer Display stays on top while scrolling
+                VStack {
+                    HStack {
+                        Text("Time Remaining: \(viewModel.timeRemaining) seconds")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .padding()
+                        
+                        Spacer() // To push the timer to the left
+                    }
+                    
+                    // Progress View for Timer
+                    ProgressView(value: Float(viewModel.timeRemaining), total: Float(timeLimit))
+                        .progressViewStyle(LinearProgressViewStyle(tint: Color.green))
+                        .padding(.horizontal)
+                        .padding(.top)
+                }
+                .background(Color.black.opacity(0.5)) // Optional: Add a slight transparent background to make the timer stand out
+                
+                ScrollView {
+                    VStack {
+                        // Trivia Questions with Card Layout
+                        ForEach(viewModel.questions) { question in
+                            VStack(alignment: .leading) {
+                                Text(question.question)
+                                    .font(.title)
+                                    .padding()
+                                    .frame(maxWidth: .infinity)
+                                    .background(Color.white)
+                                    .cornerRadius(15)
+                                    .shadow(radius: 10)
+                                
+                                ForEach(question.allAnswers, id: \.self) { answer in
+                                    Button(action: {
+                                        viewModel.selectedAnswers[question.id] = answer
+                                    }) {
+                                        Text(answer)
+                                            .padding()
+                                            .frame(maxWidth: .infinity)
+                                            .background(answerBackground(for: question, answer: answer)) // Highlight answers
+                                            .cornerRadius(8)
+                                            .foregroundColor(.white)
+                                    }
+                                    .buttonStyle(PlainButtonStyle())
+                                    .disabled(viewModel.submitted)
+                                }
+                            }
+                            .padding()
+                        }
+                        
+                        // Submit Button
+                        Button("Submit Answers") {
+                            viewModel.submitAnswers()
+                        }
+                        .padding()
+                        .background(Color.green)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                        .disabled(viewModel.selectedAnswers.count < viewModel.questions.count || viewModel.submitted)
+                        .padding(.bottom)
+                        
+                        if viewModel.submitted {
+                            Text("Your Score: \(viewModel.score ?? 0)/\(viewModel.questions.count)")
+                                .font(.title2)
+                                .fontWeight(.bold)
+                                .padding()
+                                .foregroundColor(.black)
+                        }
+
+                        
+                        // Question Counter
+                        if let score = viewModel.score {
+                            Text("You got \(score) out of \(viewModel.questions.count) correct!")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .padding()
+                        }
+                        
+                        // Back to Options Button
+                        NavigationLink(destination: TriviaOptionsView()) {
+                            Text("Back to Options")
+                                .font(.headline)
+                                .padding()
+                                .background(Color.blue)
+                                .foregroundColor(.white)
+                                .cornerRadius(10)
+                                .padding(.top)
+                        }
+                        .padding(.bottom)
+                    }
+                    .padding(.top)
+                }
+            }
+        }
+        .onAppear {
+            viewModel.fetchTrivia(categoryID: categoryID, difficulty: difficulty, type: type, amount: amount, timeLimit: timeLimit)
+        }
+    }
+    
+    // The answerBackground function to highlight answers based on correctness
+    func answerBackground(for question: TriviaQuestion, answer: String) -> Color {
+        if viewModel.submitted {
+            if answer == question.correct_answer {
+                // Correct answer highlighted in green
+                return Color.green.opacity(0.7)
+            } else if viewModel.selectedAnswers[question.id] == answer {
+                // Incorrect answer selected by the user, highlight in red
+                return Color.red.opacity(0.7)
+            }
+        }
+        // Default neutral color when the answer isn't selected or submitted
+        return viewModel.selectedAnswers[question.id] == answer ? Color.blue.opacity(0.5) : Color.gray.opacity(0.2)
+    }
+}
+
+
+
+
+
+struct ContentView: View {
+    var body: some View {
+        TriviaOptionsView()
+    }
+}
+@main
+struct TriviaGameApp: App {
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
+    }
+}
+struct TriviaOptionsView: View {
+    @State private var numberOfQuestions = 5
+    @State private var selectedCategory = "General Knowledge"
+    @State private var selectedDifficulty = "Easy"
+    @State private var questionType = "multiple"
+    @State private var timeLimit = 60
+    
+    let categories = ["General Knowledge": 9, "Science": 17, "Math": 19, "History": 23]
+    let difficulties = ["Easy", "Medium", "Hard"]
+    let questionTypes = ["multiple", "boolean"]
+    
+    var body: some View {
+        NavigationView {
+            VStack {
+                Text("Choose Your Trivia Settings")
+                    .font(.largeTitle)
+                    .fontWeight(.bold)
+                    .foregroundColor(.white)
+                    .padding(.top, 50) // Adds space from the top to avoid the notch
+                
+                Form {
+                    // Number of Questions Section
+                    Section(header: Text("Number of Questions").font(.headline).foregroundColor(.blue)) {
+                        Stepper(value: $numberOfQuestions, in: 1...20) {
+                            Text("\(numberOfQuestions) Questions")
+                                .font(.subheadline)
+                        }
+                        .padding(.vertical)
+                    }
+                    
+                    // Time Limit Section
+                    Section(header: Text("Time Limit").font(.headline).foregroundColor(.blue)) {
+                        Stepper(value: $timeLimit, in: 10...300, step: 10) {
+                            Text("\(timeLimit) seconds")
+                                .font(.subheadline)
+                        }
+                        .padding(.vertical)
+                    }
+                    
+                    // Category Selection Section with Dropdown
+                    Section(header: Text("Category").font(.headline).foregroundColor(.blue)) {
+                        Menu {
+                            ForEach(categories.keys.sorted(), id: \.self) { category in
+                                Button(action: {
+                                    selectedCategory = category
+                                }) {
+                                    Text(category)
+                                }
+                            }
+                        } label: {
+                            Text(selectedCategory)
+                                .font(.subheadline)
+                                .foregroundColor(.black)
+                                .padding()
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.gray.opacity(0.1))
+                                .cornerRadius(8)
+                        }
+                        .padding(.vertical)
+                    }
+                    
+                    // Difficulty Section
+                    Section(header: Text("Difficulty").font(.headline).foregroundColor(.blue)) {
+                        Picker("Select Difficulty", selection: $selectedDifficulty) {
+                            ForEach(difficulties, id: \.self) { difficulty in
+                                Text(difficulty)
+                                    .font(.subheadline)
+                            }
+                        }
+                        .pickerStyle(SegmentedPickerStyle())
+                        .padding(.vertical)
+                    }
+                    
+                    // Question Type Section
+                    Section(header: Text("Question Type").font(.headline).foregroundColor(.blue)) {
+                        Picker("Select Question Type", selection: $questionType) {
+                            ForEach(questionTypes, id: \.self) { type in
+                                Text(type.capitalized)
+                                    .font(.subheadline)
+                            }
+                        }
+                        .pickerStyle(SegmentedPickerStyle())
+                        .padding(.vertical)
+                    }
+                    
+                    // Start Game Button
+                    Section {
+                        NavigationLink(destination: TriviaGameView(categoryID: categories[selectedCategory]!, difficulty: selectedDifficulty, type: questionType, amount: numberOfQuestions, timeLimit: timeLimit)) {
+                            Text("Start Game")
+                                .font(.headline)
+                                .fontWeight(.bold)
+                                .foregroundColor(.white)
+                                .padding()
+                                .background(Color.green)
+                                .cornerRadius(10)
+                                .shadow(radius: 5)
+                        }
+                        .padding(.top)
+                    }
+                }
+                .listStyle(GroupedListStyle()) // Use grouped style for the form
+            }
+            .background(LinearGradient(gradient: Gradient(colors: [Color.purple, Color.blue]), startPoint: .top, endPoint: .bottom)) // Apply gradient
+            .edgesIgnoringSafeArea(.all) // Make sure the gradient covers the entire screen
+        }
+    }
+}
+
+
+
+
+
+
